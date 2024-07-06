@@ -1,137 +1,98 @@
-// import { Injectable } from '@nestjs/common';
-// import * as cheerio from 'cheerio';
-// import axios from 'axios';
-// import * as fs from 'fs';
-
-// @Injectable()
-// export class ProxyService {
-//   constructor() {}
-
-//   async fetchAndModifyContent(url: string): Promise<string> {
-//     const response = await axios.get(url);
-//     const $ = cheerio.load(response.data);
-  
-//     // Function to modify six-letter words
-//     const modifyText = (text: string) => text.replace(/\b\w{6}\b/g, (match) => `${match}™`);
-  
-//     // Function to recursively modify text nodes
-//     const traverseAndModify = (node: cheerio.Element) => {
-//       $(node).contents().each((i, child) => {
-//         if (child.type === 'text') {
-//           child.data = modifyText(child.data);
-//         } else if (child.type === 'tag' && child.tagName !== 'script') {
-//           traverseAndModify(child);
-//         }
-//       });
-//     };
-  
-//     // Start traversal from the body element
-//     traverseAndModify($('body')[0]);
-  
-//     // Update internal links
-//     $('a[href^="/"]').each((i, elem) => {
-//       const originalHref = $(elem).attr('href');
-//       if (originalHref) {
-//         $(elem).attr('href', `/proxy?url=${originalHref}`);
-//       }
-//     });
-  
-//     const modifiedHtml = $.html();
-//     fs.writeFileSync('output.html', modifiedHtml); // Write to file for inspection
-  
-//     return modifiedHtml;
-//   }  
-// }
-
-import { Injectable } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
+import { HttpService } from '@nestjs/axios';
+import { lastValueFrom } from 'rxjs';
 import * as cheerio from 'cheerio';
-import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
 
 @Injectable()
 export class ProxyService {
-  constructor() {}
+  constructor(private readonly httpService: HttpService) {}
 
-  async fetchAndModifyContent(url: string): Promise<string> {
-    const response = await axios.get(url);
-    const $ = cheerio.load(response.data);
+  async fetchAndModify(url: string): Promise<string> {
+    console.log(`Fetching URL: ${url}`);
+    try {
+      const response = await lastValueFrom(this.httpService.get(url));
+      console.log('Response Status:', response.status);
+      console.log('Response Headers:', response.headers);
+      console.log('Response Data:', response.data);
 
-    // Function to modify six-letter words
-    const modifyText = (text: string) => text.replace(/\b\w{6}\b/g, (match) => `${match}™`);
+      const $ = cheerio.load(response.data);
 
-    // Function to recursively modify text nodes
-    const traverseAndModify = (node: cheerio.Cheerio<cheerio.Element>) => {
-      node.contents().each((i, child) => {
-        if (child.type === 'text') {
-          child.data = modifyText(child.data);
-        } else if (child.type === 'tag' && child.tagName !== 'script' && child.tagName !== 'style') {
-          traverseAndModify($(child));
+      // Update internal links
+      $('a').each((i, link) => {
+        const href = $(link).attr('href');
+        if (href && href.startsWith('/')) {
+          $(link).attr(
+            'href',
+            `http://localhost:3000/proxy?url=https://docs.nestjs.com${href}`,
+          );
         }
       });
-    };
 
-    // Start traversal from the body element
-    traverseAndModify($('body'));
+      // Update text content
+      $('body *').each((i, elem) => {
+        const text = $(elem).text();
+        const modifiedText = text
+          .split(' ')
+          .map((word) => (word.length === 6 ? `${word}™` : word))
+          .join(' ');
+        $(elem).text(modifiedText);
+      });
 
-    // Update internal links
-    $('a[href^="/"]').each((i, elem) => {
-      const originalHref = $(elem).attr('href');
-      if (originalHref) {
-        $(elem).attr('href', `/proxy?url=${originalHref}`);
-      }
-    });
+      const modifiedHtml = $.html();
+      console.log('Modified HTML:', modifiedHtml);
 
-    // Fetch and inline critical CSS and JS files
-    const inlineResource = async (url: string, attribute: string) => {
-      try {
-        const resourceResponse = await axios.get(url);
-        if (attribute === 'href') {
-          $('head').append(`<style>${resourceResponse.data}</style>`);
-        } else if (attribute === 'src') {
-          $('body').append(`<script>${resourceResponse.data}</script>`);
-        }
-      } catch (error) {
-        console.error(`Failed to fetch resource: ${url}`, error);
-      }
-    };
-
-    // Process link and script tags
-    const processResourceTags = async () => {
-      const linkTags = $('link[rel="stylesheet"][href]').toArray();
-      const scriptTags = $('script[src]').toArray();
-
-      for (const tag of linkTags) {
-        const href = $(tag).attr('href');
-        if (href && !href.startsWith('http')) {
-          await inlineResource(new URL(href, url).href, 'href');
-        }
+      // Ensure the public directory exists
+      const publicDir = path.join(__dirname, '..', 'public');
+      if (!fs.existsSync(publicDir)) {
+        fs.mkdirSync(publicDir);
       }
 
-      for (const tag of scriptTags) {
-        const src = $(tag).attr('src');
-        if (src && !src.startsWith('http')) {
-          await inlineResource(new URL(src, url).href, 'src');
-        }
+      // Save the modified HTML to a file
+      const filePath = path.join(publicDir, 'modified.html');
+      fs.writeFileSync(filePath, modifiedHtml);
+
+      return modifiedHtml;
+    } catch (error) {
+      if (error.response) {
+        console.error('Response Data:', error.response.data);
+        console.error('Response Status:', error.response.status);
+        console.error('Response Headers:', error.response.headers);
+      } else {
+        console.error('Error Message:', error.message);
       }
-    };
+      throw new HttpException(
+        'Failed to fetch or modify content',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+  }
 
-    await processResourceTags();
-
-    // Update remaining resource links to absolute URLs
-    $('link[href], script[src], img[src]').each((i, elem) => {
-      const attribute = $(elem).attr('href') ? 'href' : 'src';
-      const originalUrl = $(elem).attr(attribute);
-      if (originalUrl && !originalUrl.startsWith('http')) {
-        $(elem).attr(attribute, new URL(originalUrl, url).href);
+  async fetchStaticFile(url: string): Promise<any> {
+    try {
+      const response = await lastValueFrom(
+        this.httpService.get(url, { responseType: 'arraybuffer' }),
+      );
+      if (response.status >= 400) {
+        throw new HttpException(
+          'Failed to fetch static file',
+          HttpStatus.BAD_REQUEST,
+        );
       }
-    });
-
-    const modifiedHtml = $.html();
-    fs.writeFileSync(path.join(__dirname, 'output.html'), modifiedHtml); // Write to file for inspection
-    console.log(modifiedHtml); // Log to console for inspection
-
-    return modifiedHtml;
+      return response;
+    } catch (error) {
+      if (error.response) {
+        console.error('Static File Response Data:', error.response.data);
+        console.error('Static File Response Status:', error.response.status);
+        console.error('Static File Response Headers:', error.response.headers);
+      } else {
+        console.error('Static File Error Message:', error.message);
+      }
+      throw new HttpException(
+        'Failed to fetch static file',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
   }
 }
-
